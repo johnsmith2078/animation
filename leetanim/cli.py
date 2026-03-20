@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .env import load_project_env
 from .pipeline import Pipeline
 
 
@@ -56,9 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    project_root = Path(__file__).resolve().parent.parent
+    load_project_env(project_root)
     parser = build_parser()
     args = parser.parse_args()
-    project_root = Path(__file__).resolve().parent.parent
     pipeline = Pipeline(project_root)
 
     if args.command == "ingest":

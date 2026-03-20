@@ -4,6 +4,8 @@ import json
 import os
 import shutil
 import subprocess
+import io
+import tokenize
 from pathlib import Path
 from typing import Any
 
@@ -22,15 +24,20 @@ from .codegen import (
 from .llm import OpenAICompatibleLLM
 from .models import ProblemArtifact, TimelineArtifact
 from .prompts import (
+    build_manim_repair_user_prompt,
+    build_manim_user_prompt,
     build_solution_user_prompt,
     build_timeline_user_prompt,
+    manim_system_prompt,
     solution_system_prompt,
     timeline_system_prompt,
 )
 from .utils import (
     ensure_dir,
     extract_json_block,
+    extract_python_block,
     first_heading,
+    markdown_to_speech_text,
     now_compact,
     now_utc_iso,
     read_json,
@@ -42,6 +49,85 @@ from .utils import (
 
 
 class Pipeline:
+    _VALID_MANIM_COLOR_CONSTANTS = frozenset(
+        {
+            "BLACK",
+            "WHITE",
+            "BLUE",
+            "BLUE_A",
+            "BLUE_B",
+            "BLUE_C",
+            "BLUE_D",
+            "BLUE_E",
+            "TEAL",
+            "TEAL_A",
+            "TEAL_B",
+            "TEAL_C",
+            "TEAL_D",
+            "TEAL_E",
+            "GREEN",
+            "GREEN_A",
+            "GREEN_B",
+            "GREEN_C",
+            "GREEN_D",
+            "GREEN_E",
+            "YELLOW",
+            "YELLOW_A",
+            "YELLOW_B",
+            "YELLOW_C",
+            "YELLOW_D",
+            "YELLOW_E",
+            "GOLD",
+            "GOLD_A",
+            "GOLD_B",
+            "GOLD_C",
+            "GOLD_D",
+            "GOLD_E",
+            "RED",
+            "RED_A",
+            "RED_B",
+            "RED_C",
+            "RED_D",
+            "RED_E",
+            "MAROON",
+            "MAROON_A",
+            "MAROON_B",
+            "MAROON_C",
+            "MAROON_D",
+            "MAROON_E",
+            "PURPLE",
+            "PURPLE_A",
+            "PURPLE_B",
+            "PURPLE_C",
+            "PURPLE_D",
+            "PURPLE_E",
+            "GREY",
+            "GREY_A",
+            "GREY_B",
+            "GREY_C",
+            "GREY_D",
+            "GREY_E",
+            "GREY_BROWN",
+            "DARK_BROWN",
+            "LIGHT_BROWN",
+            "PINK",
+            "LIGHT_PINK",
+            "GREEN_SCREEN",
+            "ORANGE",
+        }
+    )
+    _MANIM_COLOR_ALIASES = {
+        "GRAY": "GREY",
+        "DARK_GREY": "GREY_E",
+        "DARK_GRAY": "GREY_E",
+        "DARKER_GREY": "GREY_E",
+        "DARKER_GRAY": "GREY_E",
+        "LIGHT_GREY": "GREY_A",
+        "LIGHT_GRAY": "GREY_A",
+        "LIGHTER_GREY": "GREY_A",
+        "LIGHTER_GRAY": "GREY_A",
+    }
+
     def __init__(self, project_root: Path):
         self.project_root = project_root.resolve()
         self.runs_root = ensure_dir(self.project_root / "runs")
@@ -129,7 +215,7 @@ class Pipeline:
 
         if self.llm:
             try:
-                content = self.llm.chat(solution_system_prompt(), prompt)
+                content = self.llm.chat(solution_system_prompt(), prompt, max_tokens=900)
                 quality = "llm"
             except Exception as exc:
                 content = build_solution_stub(problem, reason=f"LLM 调用失败：{exc}")
@@ -170,8 +256,8 @@ class Pipeline:
         quality = "fallback"
         if self.llm:
             try:
-                response = self.llm.chat(timeline_system_prompt(), prompt)
-                payload = json.loads(extract_json_block(response))
+                response = self.llm.chat(timeline_system_prompt(), prompt, max_tokens=1400)
+                payload = json.loads(extract_json_block(response), strict=False)
                 timeline = coerce_timeline_from_model(problem, payload, target)
                 quality = "llm"
             except Exception as exc:
@@ -190,29 +276,95 @@ class Pipeline:
     def generate_manim(self, run_dir: Path, force: bool = False) -> Path:
         problem = self.load_problem(run_dir)
         timeline = self.load_timeline(run_dir)
+        solution_path = run_dir / "02_solution" / "solution.md"
+        solution_text = read_text(solution_path) if solution_path.exists() else ""
         output_dir = ensure_dir(run_dir / "04_codegen")
         scene_path = output_dir / "manim_scene.py"
-        script_path = output_dir / "render_manim.sh"
-        if scene_path.exists() and not force:
+        script_path = output_dir / "render_manim.py"
+        prompt_path = output_dir / "timeline_to_manim.prompt.md"
+        response_path = output_dir / "timeline_to_manim.response.md"
+        legacy_script_path = output_dir / "render_manim.sh"
+        if scene_path.exists() and script_path.exists() and not force:
             return scene_path
-        write_text(scene_path, build_manim_scene_code(problem, timeline))
+
+        prompt = build_manim_user_prompt(problem, solution_text, timeline)
+        write_text(prompt_path, prompt)
+
+        scene_code = build_manim_scene_code(problem, timeline)
+        quality = "fallback_no_llm"
+        raw_response = ""
+        repaired_response = ""
+        if self.llm:
+            try:
+                raw_response = self.llm.chat(
+                    manim_system_prompt(),
+                    prompt,
+                    max_tokens=self._manim_max_tokens(),
+                )
+                scene_body = self._extract_valid_manim_scene_body(raw_response)
+                scene_code = build_manim_scene_code(problem, timeline, scene_body=scene_body)
+                self._validate_python_source(scene_code, str(scene_path))
+                write_text(response_path, raw_response.rstrip() + "\n")
+                quality = "llm"
+            except Exception as exc:
+                try:
+                    if not raw_response.strip():
+                        raise
+                    repair_prompt = build_manim_repair_user_prompt(raw_response, str(exc))
+                    repaired_response = self.llm.chat(
+                        manim_system_prompt(),
+                        repair_prompt,
+                        max_tokens=self._manim_max_tokens(),
+                    )
+                    scene_body = self._extract_valid_manim_scene_body(repaired_response)
+                    scene_code = build_manim_scene_code(problem, timeline, scene_body=scene_body)
+                    self._validate_python_source(scene_code, str(scene_path))
+                    write_text(
+                        response_path,
+                        self._format_manim_debug_response(
+                            raw_response=raw_response,
+                            repaired_response=repaired_response,
+                            first_error=str(exc),
+                        ),
+                    )
+                    quality = "llm_repaired"
+                except Exception as repair_exc:
+                    message = "# LLM Manim 代码生成失败，已回退到模板骨架。\n\n"
+                    message += f"- 首次错误: {exc}\n"
+                    message += f"- 修复错误: {repair_exc}\n"
+                    if raw_response.strip():
+                        message += "\n## 原始响应\n\n"
+                        message += raw_response.rstrip() + "\n"
+                    if repaired_response.strip():
+                        message += "\n## 修复响应\n\n"
+                        message += repaired_response.rstrip() + "\n"
+                    write_text(response_path, message)
+                    quality = "fallback_after_llm_error"
+        else:
+            write_text(response_path, "# 未配置 LLM，Manim 阶段已回退到模板骨架。\n")
+
+        write_text(scene_path, scene_code)
         write_text(script_path, build_render_manim_script())
         script_path.chmod(0o755)
-        self._set_stage(run_dir, "manim", "generated", "04_codegen/manim_scene.py")
+        if legacy_script_path.exists():
+            legacy_script_path.unlink()
+        self._set_stage(run_dir, "manim", quality, "04_codegen/manim_scene.py")
         return scene_path
 
     def generate_tts(self, run_dir: Path, force: bool = False) -> Path:
         timeline = self.load_timeline(run_dir)
         output_dir = ensure_dir(run_dir / "04_codegen")
         audio_text_dir = ensure_dir(run_dir / "05_outputs" / "audio" / "text")
-        script_path = output_dir / "render_tts.sh"
+        script_path = output_dir / "render_tts.py"
         config_path = output_dir / "tts_config.json"
+        legacy_script_path = output_dir / "render_tts.sh"
 
-        if script_path.exists() and not force:
+        if script_path.exists() and config_path.exists() and not force:
             return script_path
 
         for segment in timeline.segments:
-            write_text(audio_text_dir / f"{segment.id}.txt", segment.narration.strip() + "\n")
+            narration = markdown_to_speech_text(segment.narration).strip() or f"这一段我们讲 {segment.title}。"
+            write_text(audio_text_dir / f"{segment.id}.txt", narration + "\n")
 
         write_text(script_path, build_render_tts_script(timeline.segments))
         script_path.chmod(0o755)
@@ -225,17 +377,22 @@ class Pipeline:
                 "pitch": os.getenv("LEETANIM_PITCH", "+0Hz"),
             },
         )
-        self._set_stage(run_dir, "tts", "generated", "04_codegen/render_tts.sh")
+        if legacy_script_path.exists():
+            legacy_script_path.unlink()
+        self._set_stage(run_dir, "tts", "generated", "04_codegen/render_tts.py")
         return script_path
 
     def generate_compose(self, run_dir: Path, force: bool = False) -> Path:
         output_dir = ensure_dir(run_dir / "06_final")
-        compose_path = output_dir / "compose.sh"
+        compose_path = output_dir / "compose.py"
+        legacy_compose_path = output_dir / "compose.sh"
         if compose_path.exists() and not force:
             return compose_path
         write_text(compose_path, build_compose_script())
         compose_path.chmod(0o755)
-        self._set_stage(run_dir, "compose", "generated", "06_final/compose.sh")
+        if legacy_compose_path.exists():
+            legacy_compose_path.unlink()
+        self._set_stage(run_dir, "compose", "generated", "06_final/compose.py")
         return compose_path
 
     def sync_from_audio(self, run_dir: Path, force_regenerate_manim: bool = True) -> Path:
@@ -253,7 +410,7 @@ class Pipeline:
             found_any = True
 
         if not found_any:
-            raise RuntimeError(f"在 {audio_dir} 下未找到可读取时长的 mp3；请先执行 render_tts.sh，并确保 ffprobe 可用")
+            raise RuntimeError(f"在 {audio_dir} 下未找到可读取时长的 mp3；请先执行 render_tts.py，并确保 ffprobe 可用")
 
         timeline = rebuild_segment_times(timeline, use_actual_audio=True)
         write_json(run_dir / "03_timeline" / "timeline.json", timeline.to_dict())
@@ -371,3 +528,70 @@ class Pipeline:
             return round(value, 1)
         except Exception:
             return None
+
+    @staticmethod
+    def _validate_python_source(source: str, filename: str) -> None:
+        compile(source, filename, "exec")
+
+    @classmethod
+    def _normalize_manim_color_name(cls, name: str) -> str:
+        if name in cls._VALID_MANIM_COLOR_CONSTANTS:
+            return name
+        if name in cls._MANIM_COLOR_ALIASES:
+            return cls._MANIM_COLOR_ALIASES[name]
+
+        normalized = name.replace("GRAY", "GREY")
+        if normalized in cls._VALID_MANIM_COLOR_CONSTANTS:
+            return normalized
+        if normalized in cls._MANIM_COLOR_ALIASES:
+            return cls._MANIM_COLOR_ALIASES[normalized]
+        return name
+
+    @classmethod
+    def _normalize_manim_scene_body(cls, source: str) -> str:
+        tokens: list[tokenize.TokenInfo] = []
+        changed = False
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(source).readline):
+                if token.type == tokenize.NAME:
+                    normalized = cls._normalize_manim_color_name(token.string)
+                    if normalized != token.string:
+                        token = tokenize.TokenInfo(token.type, normalized, token.start, token.end, token.line)
+                        changed = True
+                tokens.append(token)
+        except tokenize.TokenError:
+            return source
+
+        if not changed:
+            return source
+        return tokenize.untokenize(tokens)
+
+    @staticmethod
+    def _validate_manim_scene_body(source: str) -> None:
+        first_non_empty_line = next((line.strip() for line in source.splitlines() if line.strip()), "")
+        if first_non_empty_line != "class LeetCodeSolutionScene(Scene):":
+            raise ValueError("LLM 输出必须以 class LeetCodeSolutionScene(Scene): 开头")
+        compile(source, "<llm_manim_scene_body>", "exec")
+        if "begin_segment(" not in source or "end_segment(" not in source:
+            raise ValueError("LLM 输出必须调用 self.begin_segment(...) 和 self.end_segment() 以对齐时间轴时长")
+
+    @staticmethod
+    def _manim_max_tokens() -> int:
+        return int(os.getenv("LEETANIM_MANIM_MAX_TOKENS", "2600"))
+
+    @classmethod
+    def _extract_valid_manim_scene_body(cls, raw_response: str) -> str:
+        scene_body = extract_python_block(raw_response)
+        scene_body = cls._normalize_manim_scene_body(scene_body)
+        cls._validate_manim_scene_body(scene_body)
+        return scene_body
+
+    @staticmethod
+    def _format_manim_debug_response(raw_response: str, repaired_response: str, first_error: str) -> str:
+        payload = "# 首轮 Manim 代码存在问题，已自动修复并采用修复后的版本。\n\n"
+        payload += f"- 首轮错误: {first_error}\n"
+        payload += "\n## 原始响应\n\n"
+        payload += raw_response.rstrip() + "\n"
+        payload += "\n## 修复响应\n\n"
+        payload += repaired_response.rstrip() + "\n"
+        return payload

@@ -4,6 +4,8 @@
 
 `题目 -> 题解 -> 时间轴脚本 -> Manim 代码 / edge-tts 配音 -> 合成视频`
 
+现在 `Manim` 阶段会优先调用 LLM，根据 `timeline.json` 和 `animation_script.md` 生成真正的动画代码；只有在未配置 LLM 或生成失败时，才会回退到兜底骨架场景。
+
 ## 目标
 
 - 支持从 **题号 / 标题 / 题目内容** 启动一个视频制作 run
@@ -25,7 +27,7 @@
 - 时间轴驱动的：
   - 配音脚本
   - 动画脚本
-  - Manim 场景代码
+  - LLM 生成的 Manim 场景代码
   - edge-tts 渲染脚本
   - ffmpeg 合成脚本
 - 音频生成后，按真实音频时长回写时间轴并重新生成 Manim 代码
@@ -58,9 +60,11 @@ runs/<run_id>/
 │   ├── voiceover_script.md
 │   └── animation_script.md
 ├── 04_codegen/
+│   ├── timeline_to_manim.prompt.md
+│   ├── timeline_to_manim.response.md
 │   ├── manim_scene.py
-│   ├── render_manim.sh
-│   ├── render_tts.sh
+│   ├── render_manim.py
+│   ├── render_tts.py
 │   └── tts_config.json
 ├── 05_outputs/
 │   ├── audio/
@@ -69,7 +73,7 @@ runs/<run_id>/
 │   │   └── s01.srt
 │   └── video/
 └── 06_final/
-    └── compose.sh
+    └── compose.py
 ```
 
 ## 快速开始
@@ -87,46 +91,86 @@ runs/<run_id>/
 - 同一个元素不能重复使用
 ```
 
-### 2) 可选：配置自动生成用的 LLM
+### 2) 可选：通过 `.env` 配置自动生成用的 LLM
 
-如果你希望 `题目 -> 题解` 与 `题解 -> 时间轴` 自动完成，可设置一个 OpenAI-compatible 接口：
+项目会在启动时自动加载根目录下的 `.env`。推荐做法是先复制一份示例配置：
 
 ```bash
-export LEETANIM_LLM_API_KEY="your-key"
-export LEETANIM_LLM_MODEL="gpt-4.1-mini"
-export LEETANIM_LLM_BASE_URL="https://api.openai.com/v1"
+cp .env.example .env
 ```
+
+然后在 `.env` 里填写你的本地配置，例如：
+
+```dotenv
+LEETANIM_LLM_API_KEY=your-key
+LEETANIM_LLM_MODEL=gpt-4.1-mini
+LEETANIM_LLM_BASE_URL=https://api.openai.com/v1
+```
+
+`.env` 已加入 `.gitignore`，不会被提交；仓库中保留的是可共享的 `.env.example`。
+如果某些 OpenAI-compatible 服务偶发断流，可额外配置 `LEETANIM_LLM_MAX_TOKENS`、`LEETANIM_LLM_MAX_RETRIES`、`LEETANIM_LLM_RETRY_BACKOFF_SEC` 和 `LEETANIM_LLM_MAX_CONTINUATIONS`。其中 `LEETANIM_LLM_MAX_TOKENS` 是单轮生成上限；如果模型因为 `finish_reason=length` 被截断，流水线会自动续写，直到自然收尾或达到 continuation 上限。如果 Manim 代码生成经常被截断，可单独调大 `LEETANIM_MANIM_MAX_TOKENS`。
 
 未配置时，项目也会继续生成完整骨架，但 `solution.md` 和 `timeline.json` 会退化为可人工编辑的模板/启发式结果。
 
-### 3) 生成完整流水线骨架
+### 3) 一步生成到最终视频
 
 ```bash
-python3 main.py all \
+uv run make_video.py \
+  --problem-file examples/1-two_sum.md \
+  --problem-id 1 \
+  --title "两数之和"
+```
+
+这个脚本会自动顺序执行：
+
+- `main.py all`
+- `runs/<run_id>/04_codegen/render_tts.py`
+- `main.py sync --run-dir runs/<run_id>`
+- `runs/<run_id>/04_codegen/render_manim.py`
+- `runs/<run_id>/06_final/compose.py runs/<run_id>/05_outputs/video/raw_visual.mp4`
+
+成功后，最终视频默认输出到：
+
+`runs/<run_id>/06_final/final_video.mp4`
+
+如果你已经有现成的视觉视频，也可以额外传：
+
+```bash
+uv run make_video.py \
+  --problem-file examples/1-two_sum.md \
+  --problem-id 1 \
+  --title "两数之和" \
+  --video-input /path/to/raw_visual.mp4
+```
+
+### 4) 仅生成完整流水线骨架
+
+```bash
+python main.py all \
   --problem-file /path/to/problem.md \
   --problem-id 1 \
   --title "两数之和"
 ```
 
-### 4) 生成配音
+### 5) 生成配音
 
 ```bash
-bash runs/<run_id>/04_codegen/render_tts.sh
+python runs/<run_id>/04_codegen/render_tts.py
 ```
 
-可通过环境变量控制 voice：
+可通过 `.env` 控制 voice：
 
-```bash
-export LEETANIM_VOICE="zh-CN-XiaoxiaoNeural"
-export LEETANIM_RATE="+0%"
-export LEETANIM_PITCH="+0Hz"
-export LEETANIM_VOLUME="+0%"
+```dotenv
+LEETANIM_VOICE=zh-CN-XiaoxiaoNeural
+LEETANIM_RATE=+0%
+LEETANIM_PITCH=+0Hz
+LEETANIM_VOLUME=+0%
 ```
 
-### 5) 用真实音频时长回写时间轴
+### 6) 用真实音频时长回写时间轴
 
 ```bash
-python3 main.py sync --run-dir runs/<run_id>
+python main.py sync --run-dir runs/<run_id>
 ```
 
 这一步会：
@@ -138,33 +182,43 @@ python3 main.py sync --run-dir runs/<run_id>
 - 重写 `animation_script.md`
 - 重写 `04_codegen/manim_scene.py`
 
-### 6) 渲染动画
+### 7) 渲染动画
 
 ```bash
-bash runs/<run_id>/04_codegen/render_manim.sh
+python runs/<run_id>/04_codegen/render_manim.py
+```
+
+`manim` 阶段会先把 prompt 写到 `04_codegen/timeline_to_manim.prompt.md`，再把模型原始输出写到 `04_codegen/timeline_to_manim.response.md`，最后产出 `manim_scene.py`。如果 LLM 不可用或输出无效 Python，才会回退到兜底场景骨架。
+
+如果中文文字显示成方块、乱码或十六进制码位，可在 `.env` 里显式指定：
+
+```dotenv
+LEETANIM_MANIM_FONT=Microsoft YaHei
 ```
 
 > `manimgl`/`manim-render` 的输出目录取决于你的 manim 配置。渲染后请将视觉视频放到：
 >
 > `runs/<run_id>/05_outputs/video/raw_visual.mp4`
 
-### 7) 合成最终视频
+### 8) 合成最终视频
 
 ```bash
-bash runs/<run_id>/06_final/compose.sh runs/<run_id>/05_outputs/video/raw_visual.mp4
+python runs/<run_id>/06_final/compose.py runs/<run_id>/05_outputs/video/raw_visual.mp4
 ```
+
+compose 阶段会自动把 `05_outputs/audio/*.srt` 合并成 `06_final/final_subtitles.srt`，并烧录到 `06_final/final_video.mp4`。因此生成 Manim 动画时应默认给底部字幕留出安全区。
 
 ## CLI
 
 ```bash
-python3 main.py ingest    # 仅创建 run 并保存题目
-python3 main.py solution  # 生成题解
-python3 main.py timeline  # 生成时间轴/配音脚本/动画脚本
-python3 main.py manim     # 生成 manim_scene.py
-python3 main.py tts       # 生成 edge-tts 文本资产与脚本
-python3 main.py sync      # 按真实音频回写时间轴
-python3 main.py compose   # 生成 compose.sh
-python3 main.py all       # 一次完成以上阶段
+python main.py ingest    # 仅创建 run 并保存题目
+python main.py solution  # 生成题解
+python main.py timeline  # 生成时间轴/配音脚本/动画脚本
+python main.py manim     # 生成 manim_scene.py 与 render_manim.py
+python main.py tts       # 生成 edge-tts 文本资产与 render_tts.py
+python main.py sync      # 按真实音频回写时间轴
+python main.py compose   # 生成 compose.py
+python main.py all       # 一次完成以上阶段
 ```
 
 ## 关键设计
@@ -178,9 +232,9 @@ python3 main.py all       # 一次完成以上阶段
 - `voiceover_script.md`
 - `animation_script.md`
 - `manim_scene.py`
-- `render_tts.sh`
+- `render_tts.py`
 
-这样可以保证动画与配音都围绕同一组 segment 时间轴生成。
+这样可以保证动画与配音都围绕同一组 segment 时间轴生成。需要注意的是，`animation_script.md` 现在是给 LLM 生成动画代码的“指导输入”，不应该再被直接当成屏幕文字渲染。
 
 ### 2. 先估时，再用真实音频校准
 
