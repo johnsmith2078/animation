@@ -1,0 +1,26 @@
+[project]
+name = "animation"
+version = "0.1.0"
+description = "LeetCode explanation video pipeline with Manim and edge-tts"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "edge-tts>=7.2.7",
+    "manimgl>=1.7.2",
+    "setuptools<81",
+]
+
+[project.scripts]
+leetanim = "leetanim.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["leetanim*"]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
