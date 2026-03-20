@@ -23,6 +23,7 @@ from .codegen import (
 )
 from .llm import OpenAICompatibleLLM
 from .models import ProblemArtifact, TimelineArtifact
+from .problem_provider import LeetCodeCNProvider, ProblemProviderError
 from .prompts import (
     build_manim_repair_user_prompt,
     build_manim_user_prompt,
@@ -128,10 +129,11 @@ class Pipeline:
         "LIGHTER_GRAY": "GREY_A",
     }
 
-    def __init__(self, project_root: Path):
+    def __init__(self, project_root: Path, problem_provider: LeetCodeCNProvider | None = None):
         self.project_root = project_root.resolve()
         self.runs_root = ensure_dir(self.project_root / "runs")
         self.llm = OpenAICompatibleLLM.from_env()
+        self.problem_provider = problem_provider or LeetCodeCNProvider()
         self.default_target_duration_sec = float(os.getenv("LEETANIM_TARGET_DURATION_SEC", "90"))
 
     def create_run(
@@ -146,13 +148,23 @@ class Pipeline:
         language: str = "zh-CN",
         run_dir: Path | None = None,
     ) -> Path:
-        content = self._resolve_problem_text(problem_file, problem_text, problem_id, title)
-        resolved_title = title or first_heading(content) or f"LeetCode {problem_id or 'unknown'}"
-        resolved_problem_id = str(problem_id or self._extract_problem_id_from_title(resolved_title) or "unknown")
-        resolved_slug = slug or slugify(resolved_title, fallback=f"p{resolved_problem_id}")
+        problem = self._resolve_problem_artifact(
+            problem_file=problem_file,
+            problem_text=problem_text,
+            problem_id=problem_id,
+            title=title,
+            source=source,
+            language=language,
+        )
+        problem.slug = slug or problem.slug or slugify(problem.title, fallback=f"p{problem.problem_id}")
+        problem.metadata = {
+            **problem.metadata,
+            "created_at": now_utc_iso(),
+            "original_problem_file": str(problem_file) if problem_file else None,
+        }
 
         if run_dir is None:
-            run_name = f"{now_compact()}_{resolved_problem_id}_{resolved_slug}"
+            run_name = f"{now_compact()}_{problem.problem_id}_{problem.slug}"
             run_dir = self.runs_root / run_name
         else:
             run_dir = run_dir.resolve()
@@ -166,19 +178,7 @@ class Pipeline:
         ensure_dir(run_dir / "05_outputs" / "video")
         ensure_dir(run_dir / "06_final")
 
-        problem = ProblemArtifact(
-            problem_id=resolved_problem_id,
-            title=resolved_title,
-            slug=resolved_slug,
-            source=source,
-            language=language,
-            statement_markdown=content,
-            metadata={
-                "created_at": now_utc_iso(),
-                "original_problem_file": str(problem_file) if problem_file else None,
-            },
-        )
-        write_text(run_dir / "01_problem" / "problem.md", content)
+        write_text(run_dir / "01_problem" / "problem.md", problem.statement_markdown)
         write_json(run_dir / "01_problem" / "problem.json", problem.to_dict())
         self._update_manifest(
             run_dir,
@@ -186,10 +186,10 @@ class Pipeline:
                 "run_id": run_dir.name,
                 "created_at": now_utc_iso(),
                 "problem": {
-                    "problem_id": resolved_problem_id,
-                    "title": resolved_title,
-                    "slug": resolved_slug,
-                    "source": source,
+                    "problem_id": problem.problem_id,
+                    "title": problem.title,
+                    "slug": problem.slug,
+                    "source": problem.source,
                 },
                 "stages": {
                     "problem": {
@@ -476,8 +476,50 @@ class Pipeline:
         return (
             f"# {resolved_title}\n\n"
             "> [占位题目]\n"
-            "> 当前只提供了题号/标题，尚未接入 LeetCode 自动抓题。\n"
+            "> 当前没有提供题面内容。\n"
+            "> 如果提供了题号，create_run 会优先尝试从 LeetCode 中文站自动抓题。\n"
             "> 请把真实题面填到本文件，再重新运行 solution/timeline 阶段。\n"
+        )
+
+    def _resolve_problem_artifact(
+        self,
+        *,
+        problem_file: Path | None,
+        problem_text: str | None,
+        problem_id: str | None,
+        title: str | None,
+        source: str,
+        language: str,
+    ) -> ProblemArtifact:
+        if problem_file or problem_text:
+            content = self._resolve_problem_text(problem_file, problem_text, problem_id, title)
+            resolved_title = title or first_heading(content) or f"LeetCode {problem_id or 'unknown'}"
+            resolved_problem_id = str(problem_id or self._extract_problem_id_from_title(resolved_title) or "unknown")
+            return ProblemArtifact(
+                problem_id=resolved_problem_id,
+                title=resolved_title,
+                slug=slugify(resolved_title, fallback=f"p{resolved_problem_id}"),
+                source=source,
+                language=language,
+                statement_markdown=content,
+            )
+
+        if problem_id:
+            try:
+                return self.problem_provider.fetch_by_frontend_id(problem_id)
+            except ProblemProviderError as exc:
+                raise RuntimeError(f"根据题号 {problem_id} 抓取 LeetCode 中文站题面失败: {exc}") from exc
+
+        content = self._resolve_problem_text(problem_file, problem_text, problem_id, title)
+        resolved_title = title or first_heading(content) or "LeetCode unknown"
+        resolved_problem_id = str(self._extract_problem_id_from_title(resolved_title) or "unknown")
+        return ProblemArtifact(
+            problem_id=resolved_problem_id,
+            title=resolved_title,
+            slug=slugify(resolved_title, fallback=f"p{resolved_problem_id}"),
+            source=source,
+            language=language,
+            statement_markdown=content,
         )
 
     @staticmethod

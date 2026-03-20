@@ -22,6 +22,7 @@
 
 - 分阶段目录结构
 - 题目入库
+- 仅提供题号时，自动从 LeetCode 中文站抓取标题和题目描述
 - `Problem -> Solution` 提示词/自动生成骨架
 - `Solution -> Timeline` 提示词/自动生成骨架
 - 时间轴驱动的：
@@ -34,9 +35,6 @@
 
 暂未实现：
 
-- 直接通过题号自动抓取 LeetCode 原题内容
-  - 现在支持 `题目文件 / 内联题目文本 / 占位题号+标题`
-  - 后续可以在 `ProblemProvider` 层接入 LeetCode 抓题
 - 高度定制化的算法动画
   - 当前自动生成的是“题解讲解型”场景骨架
   - 后续可以为双指针、二叉树、DP、回溯等题型增加专用动画模板
@@ -80,7 +78,13 @@ runs/<run_id>/
 
 ### 1) 准备题目输入
 
-建议先准备一个 markdown 文件，比如：
+可以直接只传题号自动抓题：
+
+```bash
+python main.py ingest --problem-id 1
+```
+
+也可以继续手工准备一个 markdown 文件，比如：
 
 ```md
 # 1. 两数之和
@@ -116,9 +120,7 @@ LEETANIM_LLM_BASE_URL=https://api.openai.com/v1
 
 ```bash
 uv run make_video.py \
-  --problem-file examples/1-two_sum.md \
-  --problem-id 1 \
-  --title "两数之和"
+  --problem-id 1
 ```
 
 这个脚本会自动顺序执行：
@@ -137,9 +139,7 @@ uv run make_video.py \
 
 ```bash
 uv run make_video.py \
-  --problem-file examples/1-two_sum.md \
   --problem-id 1 \
-  --title "两数之和" \
   --video-input /path/to/raw_visual.mp4
 ```
 
@@ -147,9 +147,7 @@ uv run make_video.py \
 
 ```bash
 python main.py all \
-  --problem-file /path/to/problem.md \
-  --problem-id 1 \
-  --title "两数之和"
+  --problem-id 1
 ```
 
 ### 5) 生成配音
@@ -259,7 +257,7 @@ python main.py all       # 一次完成以上阶段
 
 ## 推荐的下一步扩展
 
-1. 接入 `LeetCodeProvider`：支持 `题号 -> slug -> 题面`
+1. 为常见题型增加更强的专用动画模板，而不是只依赖通用讲解骨架
 2. 增加算法模板：
    - 数组/哈希
    - 双指针

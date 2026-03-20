@@ -14,7 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
     def add_problem_input_arguments(target: argparse.ArgumentParser) -> None:
         target.add_argument("--problem-file", type=Path, help="题目 markdown 文件路径")
         target.add_argument("--problem-text", help="直接传入题目内容")
-        target.add_argument("--problem-id", help="题号")
+        target.add_argument("--problem-id", help="题号；未提供题面时会自动抓取 LeetCode 中文站题目")
         target.add_argument("--title", help="题目标题")
         target.add_argument("--slug", help="自定义 slug")
         target.add_argument("--source", default="manual", help="题目来源")

@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="一键完成题解视频流水线")
     parser.add_argument("--problem-file", type=Path, help="题目 markdown 文件路径")
     parser.add_argument("--problem-text", help="直接传入题目内容")
-    parser.add_argument("--problem-id", help="题号")
+    parser.add_argument("--problem-id", help="题号；未提供题面时会自动抓取 LeetCode 中文站题目")
     parser.add_argument("--title", help="题目标题")
     parser.add_argument("--slug", help="自定义 slug")
     parser.add_argument("--source", default="manual", help="题目来源")

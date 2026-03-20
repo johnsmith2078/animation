@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from leetanim.codegen import build_manim_scene_code
 from leetanim.models import ProblemArtifact, TimelineArtifact, TimelineSegment
 from leetanim.pipeline import Pipeline
 from leetanim.prompts import build_manim_user_prompt
@@ -98,6 +99,11 @@ class LeetCodeSolutionScene(Scene):
         self.assertIn("set_fill(GREY_E, 0.9)", scene_body)
         self.assertIn("set_stroke(GREY_A, 2)", scene_body)
         self.assertNotIn("accent = GRAY_A", scene_body)
+
+    def test_generated_scene_code_compiles_with_latex_backslashes_in_preamble(self) -> None:
+        source = build_manim_scene_code(self.problem, self.timeline)
+
+        compile(source, "<generated_manim_scene>", "exec")
 
 
 if __name__ == "__main__":

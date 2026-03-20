@@ -552,7 +552,7 @@ def _normalize_vector(vector, fallback=DOWN):
 
 
 class Brace(VGroup):
-    """
+    r"""
     LaTeX-free brace fallback.
 
     manimlib.Brace internally renders ``\\underbrace{{\\qquad}}`` via LaTeX.
